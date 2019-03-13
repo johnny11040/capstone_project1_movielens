@@ -1,0 +1,201 @@
+---
+title: "Movielens Recommendation System"
+output: pdf_document
+---
+
+## Executive Summary
+This report documents the analyses used to design the movie recommendation system based on the Movielens 10M dataset. 
+
+The Movielens 10M dataset was obtained from <https://grouplens.org/datasets/movielens/10m/> and contained the following individual files - 
+
+1. ratings.dat - Each line represented one rating of one movie by one user. Movies and users are identified by movieId and userId respectively.
+2. movies.dat - Each line represented one movie and provided titles and genres for each movieId
+
+Prior to conducting analyses and building the recommendations system, the ratings.dat and movies.dat files were merged on movieId and split into training (edx) and test (validation) datasets such that the validation dataset contained 10% of all data. 
+
+Exploratory analyses were then conducted to get a feel for the data and assess plausibility of hypotheses. 
+
+A model based on the matrix factorization method was built on the edx set and tested on the validation set. Iterations were performed to enhance the accuracy of the model. 
+
+The best RMSE obtained on the validation set was 0.865.
+
+## Analysis
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org"); library(tidyverse)
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org"); library(caret)
+
+# Download the data
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+
+#### Load Data, Create edx set, validation set, and submission file ####
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+First step of the analysis is merging ratings.dat and movies.dat and creating the edx and validation datasets using the code given. 
+The dimensions and structure of the edx and validation datasets created are as follows - 
+
+```{r}
+dim(edx)
+str(edx)
+
+dim(validation)
+str(validation)
+```
+
+\
+
+Next, the edx dataset is checked for missing or NA values. The ratings field is also checked to confirm all values are within the required 0.5-5 range. 
+
+```{r}
+# Check if there are any blank values in the dataset
+sapply(edx, function(x) sum(is.na(x)))
+
+# Check if any rating is > 5 or <= 0
+sum(edx$rating > 5 | edx$rating <= 0)
+
+```
+
+\
+Descriptive statistics are reported / visualized. Specifically, 
+
+1. count of movies and users are calculated to get a sense of scope of the data 
+
+```{r}
+# Count of movies
+length(unique(edx$movieId))
+
+# Count of users
+length(unique(edx$userId))
+
+```
+
+2. distributions of ratings are plotted to understand which ratings are most frequently given
+
+```{r}
+# Distribution of ratings given
+hist(edx$rating, xlab="Rating", main="Histogram of Ratings")
+```
+
+3. average ratings are computed for each movie and then plotted to see if different movies are rated differently. Similar analysis is done for users.
+
+```{r}
+# Distribution of average ratings by movies
+movie_avgs <- edx %>% group_by(movieId) %>% summarize(avg_rating = mean(rating))
+hist(movie_avgs$avg_rating, xlab="Average Rating", main="Histogram of average rating by movie")
+
+# Distribution of average ratings by users
+user_avgs <- edx %>% group_by(userId) %>% summarize(avg_rating = mean(rating))
+hist(movie_avgs$avg_rating, xlab="Average Rating", main="Histogram of average rating by user")
+
+```
+
+\
+Matrix Factorization based model is used to predict ratings in the validation set. The basic average rating model was first tried. Then, a movie bias, b_i, was built in to account for differences in ratings across movies. Finally, a user bias, b_u, was built in to account for differences in ratings given by different users.
+
+```{r}
+# Just the average rating across all movies and users
+mu <- mean(edx$rating)
+mu
+
+# Account for differences between movies
+movie_avgs <- edx %>% group_by(movieId) %>% summarize(b_i = mean(rating - mu))
+pred_movies <- mu + validation %>% left_join(movie_avgs, by='movieId') %>% .$b_i
+
+# Account for differences between users
+user_avgs <- 
+  edx %>% left_join(movie_avgs, by='movieId') %>% 
+  group_by(userId) %>% summarize(b_u = mean(rating - mu - b_i))
+
+pred_users <- 
+  validation %>% 
+  left_join(movie_avgs, by='movieId') %>% 
+  left_join(user_avgs, by='userId') %>% 
+  mutate(pred = mu + b_i + b_u) %>% .$pred
+
+```
+
+## Results
+In the data preprocessing stage, it was observed that the data is accurate and no cleaning, treatment or imputation is necessary. 
+
+\
+Looking at the distribution of all ratings, it was observed that 4 was the most frequently given rating followed by 3. It was also observed that half star ratings are less common than full star ratings. 
+
+Looking at the distribution of average rating by movie, it is evident that there are substantial differences between ratings for different movies. This made the case for building in a movie bias in the model.
+
+Looking at the distribution of average rating by user, it is evident that different users tend to rate movies differently. Some consistently give 5 star ratings, whereas some give much lower ratings on average. This made the case for building in a user bias.  
+
+\
+Root mean squared error (RMSE) was calculated for the three models. 
+
+In the first model, the simple average rating across all movies in the edx set was used as prediction for ratings in the validation set. This resulted in an RMSE of 1.06.
+
+```{r}
+naive_rmse <- RMSE(mu, validation$rating)
+naive_rmse
+```
+
+In the second model, the bias term b_i to account for movie differences was calculated and added to the naive average mu. This reduced the RMSE to 0.94.
+
+```{r}
+model_1_rmse <- RMSE(pred_movies, validation$rating)
+model_1_rmse
+```
+
+Finally, the bias term b_u to account for user differences was calculated and added to mu + b_i. This further reduced the RMSE to 0.865, thus achieving the desired result. 
+
+```{r}
+model_2_rmse <- RMSE(pred_users, validation$rating)
+model_2_rmse
+```
+
+Here's a plot of the three RMSE values to visualize the model improvement at each stage. 
+
+```{r}
+barplot(c(naive_rmse, model_1_rmse, model_2_rmse), names.arg = c("Naive mean", "Movie Effect", "User Effect"))
+```
+
+## Conclusion
+A movie recommendation system was designed and built using the matrix factorization method on the 10M movielens dataset. 
+
+The best RMSE was achieved after accounting for movie bias and user bias. The fact that RMSE decreased each time when movie bias was introduced and when user bias was introduced clearly suggests that the movie that is being rated and the user who is rating it have a significant influence on the given rating.
+Therefore, any movie recommendation model should include movie and user identifiers as predictor variables. 
+
+Additionally, techniques like multiclass classification models, collaborative filtering, similarity mesaures, etc. can be tested to iterate and improve the performance of the recommendation system.
+
